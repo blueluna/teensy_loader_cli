@@ -565,6 +565,9 @@ void parse_options(int argc, char **argv)
 				} else if (strcasecmp(arg+6, "mk20dx128") == 0) {
 					code_size = 131072;
 					block_size = 1024;
+				} else if (strcasecmp(arg+6, "mk20dx256") == 0) {
+					code_size = 262144;
+					block_size = 1024;
 #endif
 				} else {
 					die("Unknown MCU type\n");
@@ -575,4 +578,3 @@ void parse_options(int argc, char **argv)
 		}
 	}
 }
-

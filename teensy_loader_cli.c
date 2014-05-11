@@ -25,6 +25,9 @@
  * http://www.pjrc.com/teensy/49-teensy.rules
  */
 
+/* 2014-05-11, Erik Svensson <erik.public@gmail.com>
+ * Added support for entering programming mode via USB.
+ */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -54,7 +57,7 @@ void usage(void)
 int teensy_open(void);
 int teensy_write(void *buf, int len, double timeout);
 void teensy_close(void);
-int hard_reboot(void);
+int teensy_reset(void);
 
 // Intel Hex File Functions
 int read_intel_hex(const char *filename);
@@ -70,7 +73,6 @@ void parse_options(int argc, char **argv);
 
 // options (from user via command line args)
 int wait_for_device_to_appear = 0;
-int hard_reboot_device = 0;
 int reboot_after_programming = 1;
 int verbose = 0;
 int code_size = 0, block_size = 0;
@@ -111,16 +113,11 @@ int main(int argc, char **argv)
 	// open the USB device
 	while (1) {
 		if (teensy_open()) break;
-		if (hard_reboot_device) {
-			if (!hard_reboot()) die("Unable to find rebootor\n");
-			printf_verbose("Hard Reboot performed\n");
-			hard_reboot_device = 0; // only hard reboot once
-			wait_for_device_to_appear = 1;
-		}
 		if (!wait_for_device_to_appear) die("Unable to open device\n");
 		if (!waited) {
 			printf_verbose("Waiting for Teensy device...\n");
 			printf_verbose(" (hint: press the reset button)\n");
+			teensy_reset();
 			waited = 1;
 		}
 		delay(0.25);
@@ -214,11 +211,6 @@ usb_dev_handle * open_usb_device(int vid, int pid)
 	//printf_verbose("\nSearching for USB device:\n");
 	for (bus = usb_get_busses(); bus; bus = bus->next) {
 		for (dev = bus->devices; dev; dev = dev->next) {
-			//printf_verbose("bus \"%s\", device \"%s\" vid=%04X, pid=%04X\n",
-			//	bus->dirname, dev->filename,
-			//	dev->descriptor.idVendor,
-			//	dev->descriptor.idProduct
-			//);
 			if (dev->descriptor.idVendor != vid) continue;
 			if (dev->descriptor.idProduct != pid) continue;
 			h = usb_open(dev);
@@ -286,459 +278,42 @@ void teensy_close(void)
 	libusb_teensy_handle = NULL;
 }
 
-int hard_reboot(void)
+int teensy_reset(void)
 {
 	usb_dev_handle *rebootor;
 	int r;
-
-	rebootor = open_usb_device(0x16C0, 0x0477);
-	if (!rebootor) return 0;
-	r = usb_control_msg(rebootor, 0x21, 9, 0x0200, 0, "reboot", 6, 100);
-	usb_release_interface(rebootor, 0);
-	usb_close(rebootor);
-	if (r < 0) return 0;
-	return 1;
-}
-
-#endif
-
-
-/****************************************************************/
-/*                                                              */
-/*               USB Access - Microsoft WIN32                   */
-/*                                                              */
-/****************************************************************/
-
-#if defined(USE_WIN32)
-
-// http://msdn.microsoft.com/en-us/library/ms790932.aspx
-#include <windows.h>
-#include <setupapi.h>
-#include <ddk/hidsdi.h>
-#include <ddk/hidclass.h>
-
-HANDLE open_usb_device(int vid, int pid)
-{
-	GUID guid;
-	HDEVINFO info;
-	DWORD index, required_size;
-	SP_DEVICE_INTERFACE_DATA iface;
-	SP_DEVICE_INTERFACE_DETAIL_DATA *details;
-	HIDD_ATTRIBUTES attrib;
-	HANDLE h;
-	BOOL ret;
-
-	HidD_GetHidGuid(&guid);
-	info = SetupDiGetClassDevs(&guid, NULL, NULL, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
-	if (info == INVALID_HANDLE_VALUE) return NULL;
-	for (index=0; 1 ;index++) {
-		iface.cbSize = sizeof(SP_DEVICE_INTERFACE_DATA);
-		ret = SetupDiEnumDeviceInterfaces(info, NULL, &guid, index, &iface);
-		if (!ret) {
-			SetupDiDestroyDeviceInfoList(info);
+	int c = 0;
+	char out_buf[] = {0x86, 0, 0, 0, 0, 0, 0, 0};
+	int out_len = 7;
+  
+	rebootor = open_usb_device(0x16C0, 0x0483);
+	if (!rebootor) {
+		return 0;
+	}  
+	c = 0;
+	do {
+		/* Set Control Line State */
+		/* Activate Carrier Control */
+		r = usb_control_msg(rebootor, 0x21, 0x22, 2, 0, 0, 0, 1000);
+		if (r >= 0) {
 			break;
 		}
-		SetupDiGetInterfaceDeviceDetail(info, &iface, NULL, 0, &required_size, NULL);
-		details = (SP_DEVICE_INTERFACE_DETAIL_DATA *)malloc(required_size);
-		if (details == NULL) continue;
-		memset(details, 0, required_size);
-		details->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA);
-		ret = SetupDiGetDeviceInterfaceDetail(info, &iface, details,
-			required_size, NULL, NULL);
-		if (!ret) {
-			free(details);
-			continue;
-		}
-		h = CreateFile(details->DevicePath, GENERIC_READ|GENERIC_WRITE,
-			FILE_SHARE_READ|FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
-			FILE_FLAG_OVERLAPPED, NULL);
-		free(details);
-		if (h == INVALID_HANDLE_VALUE) continue;
-		attrib.Size = sizeof(HIDD_ATTRIBUTES);
-		ret = HidD_GetAttributes(h, &attrib);
-		if (!ret) {
-			CloseHandle(h);
-			continue;
-		}
-		if (attrib.VendorID != vid || attrib.ProductID != pid) {
-			CloseHandle(h);
-			continue;
-		}
-		SetupDiDestroyDeviceInfoList(info);
-		return h;
+		usleep(1000);
+		c++;
+	} while (c < 20);
+	if (r == 0) {
+		/* Set Line Coding */
+		/* Set DTE rate to 134? */
+		/* Also, invalid data size of 0? */
+		r = usb_control_msg(rebootor, 0x21, 0x20, 0, 0
+		    , (char *)out_buf, out_len, 1000);
 	}
-	return NULL;
-}
-
-int write_usb_device(HANDLE h, void *buf, int len, int timeout)
-{
-	static HANDLE event = NULL;
-	unsigned char tmpbuf[1040];
-	OVERLAPPED ov;
-	DWORD n, r;
-
-	if (len > sizeof(tmpbuf) - 1) return 0;
-	if (event == NULL) {
-		event = CreateEvent(NULL, TRUE, TRUE, NULL);
-		if (!event) return 0;
-	}
-	ResetEvent(&event);
-	memset(&ov, 0, sizeof(ov));
-	ov.hEvent = event;
-	tmpbuf[0] = 0;
-	memcpy(tmpbuf + 1, buf, len);
-	if (!WriteFile(h, tmpbuf, len + 1, NULL, &ov)) {
-		if (GetLastError() != ERROR_IO_PENDING) return 0;
-		r = WaitForSingleObject(event, timeout);
-		if (r == WAIT_TIMEOUT) {
-			CancelIo(h);
-			return 0;
-		}
-		if (r != WAIT_OBJECT_0) return 0;
-	}
-	if (!GetOverlappedResult(h, &ov, &n, FALSE)) return 0;
-	if (n <= 0) return 0;
-	return 1;
-}
-
-void print_win32_err(void)
-{
-        char buf[256];
-        DWORD err;
-
-        err = GetLastError();
-        FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM, NULL, err,
-                0, buf, sizeof(buf), NULL);
-        printf("err %ld: %s\n", err, buf);
-}
-
-static HANDLE win32_teensy_handle = NULL;
-
-int teensy_open(void)
-{
-	teensy_close();
-	win32_teensy_handle = open_usb_device(0x16C0, 0x0478);
-	if (win32_teensy_handle) return 1;
-	return 0;
-}
-
-int teensy_write(void *buf, int len, double timeout)
-{
-	int r;
-	if (!win32_teensy_handle) return 0;
-	r = write_usb_device(win32_teensy_handle, buf, len, (int)(timeout * 1000.0));
-	//if (!r) print_win32_err();
-	return r;
-}
-
-void teensy_close(void)
-{
-	if (!win32_teensy_handle) return;
-	CloseHandle(win32_teensy_handle);
-	win32_teensy_handle = NULL;
-}
-
-int hard_reboot(void)
-{
-	HANDLE rebootor;
-	int r;
-
-	rebootor = open_usb_device(0x16C0, 0x0477);
-	if (!rebootor) return 0;
-	r = write_usb_device(rebootor, "reboot", 6, 100);
-	CloseHandle(rebootor);
-	return r;
-}
-
-#endif
-
-
-
-/****************************************************************/
-/*                                                              */
-/*             USB Access - Apple's IOKit, Mac OS-X             */
-/*                                                              */
-/****************************************************************/
-
-#if defined(USE_APPLE_IOKIT)
-
-// http://developer.apple.com/technotes/tn2007/tn2187.html
-#include <IOKit/IOKitLib.h>
-#include <IOKit/hid/IOHIDLib.h>
-#include <IOKit/hid/IOHIDDevice.h>
-
-struct usb_list_struct {
-	IOHIDDeviceRef ref;
-	int pid;
-	int vid;
-	struct usb_list_struct *next;
-};
-
-static struct usb_list_struct *usb_list=NULL;
-static IOHIDManagerRef hid_manager=NULL;
-
-void attach_callback(void *context, IOReturn r, void *hid_mgr, IOHIDDeviceRef dev)
-{
-	CFTypeRef type;
-	struct usb_list_struct *n, *p;
-	int32_t pid, vid;
-
-	if (!dev) return;
-	type = IOHIDDeviceGetProperty(dev, CFSTR(kIOHIDVendorIDKey));
-	if (!type || CFGetTypeID(type) != CFNumberGetTypeID()) return;
-	if (!CFNumberGetValue((CFNumberRef)type, kCFNumberSInt32Type, &vid)) return;
-	type = IOHIDDeviceGetProperty(dev, CFSTR(kIOHIDProductIDKey));
-	if (!type || CFGetTypeID(type) != CFNumberGetTypeID()) return;
-	if (!CFNumberGetValue((CFNumberRef)type, kCFNumberSInt32Type, &pid)) return;
-	n = (struct usb_list_struct *)malloc(sizeof(struct usb_list_struct));
-	if (!n) return;
-	//printf("attach callback: vid=%04X, pid=%04X\n", vid, pid);
-	n->ref = dev;
-	n->vid = vid;
-	n->pid = pid;
-	n->next = NULL;
-	if (usb_list == NULL) {
-		usb_list = n;
-	} else {
-		for (p = usb_list; p->next; p = p->next) ;
-		p->next = n;
-	}
-}
-
-void detach_callback(void *context, IOReturn r, void *hid_mgr, IOHIDDeviceRef dev)
-{
-	struct usb_list_struct *p, *tmp, *prev=NULL;
-
-	p = usb_list;
-	while (p) {
-		if (p->ref == dev) {
-			if (prev) {
-				prev->next = p->next;
-			} else {
-				usb_list = p->next;
-			}
-			tmp = p;
-			p = p->next;
-			free(tmp);
-		} else {
-			prev = p;
-			p = p->next;
-		}
-	}
-}
-
-void init_hid_manager(void)
-{
-	CFMutableDictionaryRef dict;
-	IOReturn ret;
-
-	if (hid_manager) return;
-	hid_manager = IOHIDManagerCreate(kCFAllocatorDefault, kIOHIDOptionsTypeNone);
-	if (hid_manager == NULL || CFGetTypeID(hid_manager) != IOHIDManagerGetTypeID()) {
-		if (hid_manager) CFRelease(hid_manager);
-		printf_verbose("no HID Manager - maybe this is a pre-Leopard (10.5) system?\n");
-		return;
-	}
-	dict = CFDictionaryCreateMutable(kCFAllocatorDefault, 0,
-		&kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-	if (!dict) return;
-	IOHIDManagerSetDeviceMatching(hid_manager, dict);
-	CFRelease(dict);
-	IOHIDManagerScheduleWithRunLoop(hid_manager, CFRunLoopGetCurrent(), kCFRunLoopDefaultMode);
-	IOHIDManagerRegisterDeviceMatchingCallback(hid_manager, attach_callback, NULL);
-	IOHIDManagerRegisterDeviceRemovalCallback(hid_manager, detach_callback, NULL);
-	ret = IOHIDManagerOpen(hid_manager, kIOHIDOptionsTypeNone);
-	if (ret != kIOReturnSuccess) {
-		IOHIDManagerUnscheduleFromRunLoop(hid_manager,
-			CFRunLoopGetCurrent(), kCFRunLoopDefaultMode);
-		CFRelease(hid_manager);
-		printf_verbose("Error opening HID Manager");
-	}
-}
-
-static void do_run_loop(void)
-{
-	while (CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0, true) == kCFRunLoopRunHandledSource) ;
-}
-
-IOHIDDeviceRef open_usb_device(int vid, int pid)
-{
-	struct usb_list_struct *p;
-	IOReturn ret;
-
-	init_hid_manager();
-	do_run_loop();
-	for (p = usb_list; p; p = p->next) {
-		if (p->vid == vid && p->pid == pid) {
-			ret = IOHIDDeviceOpen(p->ref, kIOHIDOptionsTypeNone);
-			if (ret == kIOReturnSuccess) return p->ref;
-		}
-	}
-	return NULL;
-}
-
-void close_usb_device(IOHIDDeviceRef dev)
-{
-	struct usb_list_struct *p;
-
-	do_run_loop();
-	for (p = usb_list; p; p = p->next) {
-		if (p->ref == dev) {
-			IOHIDDeviceClose(dev, kIOHIDOptionsTypeNone);
-			return;
-		}
-	}
-}
-
-static IOHIDDeviceRef iokit_teensy_reference = NULL;
-
-int teensy_open(void)
-{
-	teensy_close();
-	iokit_teensy_reference = open_usb_device(0x16C0, 0x0478);
-	if (iokit_teensy_reference) return 1;
-	return 0;
-}
-
-int teensy_write(void *buf, int len, double timeout)
-{
-	IOReturn ret;
-
-	// timeouts do not work on OS-X
-	// IOHIDDeviceSetReportWithCallback is not implemented
-	// even though Apple documents it with a code example!
-	// submitted to Apple on 22-sep-2009, problem ID 7245050
-	if (!iokit_teensy_reference) return 0;
-	ret = IOHIDDeviceSetReport(iokit_teensy_reference,
-		kIOHIDReportTypeOutput, 0, buf, len);
-	if (ret == kIOReturnSuccess) return 1;
-	return 0;
-}
-
-void teensy_close(void)
-{
-	if (!iokit_teensy_reference) return;
-	close_usb_device(iokit_teensy_reference);
-	iokit_teensy_reference = NULL;
-}
-
-int hard_reboot(void)
-{
-	IOHIDDeviceRef rebootor;
-	IOReturn ret;
-
-	rebootor = open_usb_device(0x16C0, 0x0477);
-	if (!rebootor) return 0;
-	ret = IOHIDDeviceSetReport(rebootor,
-		kIOHIDReportTypeOutput, 0, (uint8_t *)("reboot"), 6);
-	close_usb_device(rebootor);
-	if (ret == kIOReturnSuccess) return 1;
+	/* Sniffer shows setting of DTE rate to zero again. */
+	if (r >= 0) return 1;
 	return 0;
 }
 
 #endif
-
-
-
-/****************************************************************/
-/*                                                              */
-/*              USB Access - BSD's UHID driver                  */
-/*                                                              */
-/****************************************************************/
-
-#if defined(USE_UHID)
-
-// Thanks to Todd T Fries for help getting this working on OpenBSD
-// and to Chris Kuethe for the initial patch to use UHID.
-
-#include <sys/ioctl.h>
-#include <fcntl.h>
-#include <dirent.h>
-#include <dev/usb/usb.h>
-#ifndef USB_GET_DEVICEINFO
-#include <dev/usb/usb_ioctl.h>
-#endif
-
-int open_usb_device(int vid, int pid)
-{
-	int r, fd;
-	DIR *dir;
-	struct dirent *d;
-	struct usb_device_info info;
-	char buf[256];
-
-	dir = opendir("/dev");
-	if (!dir) return -1;
-	while ((d = readdir(dir)) != NULL) {
-		if (strncmp(d->d_name, "uhid", 4) != 0) continue;
-		snprintf(buf, sizeof(buf), "/dev/%s", d->d_name);
-		fd = open(buf, O_RDWR);
-		if (fd < 0) continue;
-		r = ioctl(fd, USB_GET_DEVICEINFO, &info);
-		if (r < 0) {
-			// NetBSD: added in 2004
-			// OpenBSD: added November 23, 2009
-			// FreeBSD: missing (FreeBSD 8.0) - USE_LIBUSB works!
-			die("Error: your uhid driver does not support"
-			  " USB_GET_DEVICEINFO, please upgrade!\n");
-			close(fd);
-			closedir(dir);
-			exit(1);
-		}
-		//printf("%s: v=%d, p=%d\n", buf, info.udi_vendorNo, info.udi_productNo);
-		if (info.udi_vendorNo == vid && info.udi_productNo == pid) {
-			closedir(dir);
-			return fd;
-		}
-		close(fd);
-	}
-	closedir(dir);
-	return -1;
-}
-
-static int uhid_teensy_fd = -1;
-
-int teensy_open(void)
-{
-	teensy_close();
-	uhid_teensy_fd = open_usb_device(0x16C0, 0x0478);
-	if (uhid_teensy_fd < 0) return 0;
-	return 1;
-}
-
-int teensy_write(void *buf, int len, double timeout)
-{
-	int r;
-
-	// TODO: imeplement timeout... how??
-	r = write(uhid_teensy_fd, buf, len);
-	if (r == len) return 1;
-	return 0;
-}
-
-void teensy_close(void)
-{
-	if (uhid_teensy_fd >= 0) {
-		close(uhid_teensy_fd);
-		uhid_teensy_fd = -1;
-	}
-}
-
-int hard_reboot(void)
-{
-	int r, rebootor_fd;
-
-	rebootor_fd = open_usb_device(0x16C0, 0x0477);
-	if (rebootor_fd < 0) return 0;
-	r = write(rebootor_fd, "reboot", 6);
-	delay(0.1);
-	close(rebootor_fd);
-	if (r == 6) return 1;
-	return 0;
-}
-
-#endif
-
 
 
 /****************************************************************/
@@ -969,8 +544,6 @@ void parse_options(int argc, char **argv)
 		if (*arg == '-') {
 			if (strcmp(arg, "-w") == 0) {
 				wait_for_device_to_appear = 1;
-			} else if (strcmp(arg, "-r") == 0) {
-				hard_reboot_device = 1;
 			} else if (strcmp(arg, "-n") == 0) {
 				reboot_after_programming = 0;
 			} else if (strcmp(arg, "-v") == 0) {

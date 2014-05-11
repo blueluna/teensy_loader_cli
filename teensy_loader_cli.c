@@ -280,21 +280,21 @@ void teensy_close(void)
 
 int teensy_reset(void)
 {
-	usb_dev_handle *rebootor;
+	usb_dev_handle *usb_serial;
 	int r;
 	int c = 0;
 	char out_buf[] = {0x86, 0, 0, 0, 0, 0, 0, 0};
 	int out_len = 7;
   
-	rebootor = open_usb_device(0x16C0, 0x0483);
-	if (!rebootor) {
+	usb_serial = open_usb_device(0x16C0, 0x0483);
+	if (!usb_serial) {
 		return 0;
 	}  
 	c = 0;
 	do {
 		/* Set Control Line State */
 		/* Activate Carrier Control */
-		r = usb_control_msg(rebootor, 0x21, 0x22, 2, 0, 0, 0, 1000);
+		r = usb_control_msg(usb_serial, 0x21, 0x22, 2, 0, 0, 0, 1000);
 		if (r >= 0) {
 			break;
 		}
@@ -305,10 +305,14 @@ int teensy_reset(void)
 		/* Set Line Coding */
 		/* Set DTE rate to 134? */
 		/* Also, invalid data size of 0? */
-		r = usb_control_msg(rebootor, 0x21, 0x20, 0, 0
+		r = usb_control_msg(usb_serial, 0x21, 0x20, 0, 0
 		    , (char *)out_buf, out_len, 1000);
 	}
 	/* Sniffer shows setting of DTE rate to zero again. */
+
+	usb_release_interface(usb_serial, 0);
+	usb_close(usb_serial);
+
 	if (r >= 0) return 1;
 	return 0;
 }
